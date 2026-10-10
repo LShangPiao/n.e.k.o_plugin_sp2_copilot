@@ -144,6 +144,3 @@ python -m plugin.neko_plugin_cli.cli check -r sp2_copilot --release
 ## 许可证
 
 GNU General Public License v3.0，见 [LICENSE](LICENSE)。
-
-星河拓航Studio (Galaxy Exploration Studio) · 猫娘计划
-<https://xhth.top/>
