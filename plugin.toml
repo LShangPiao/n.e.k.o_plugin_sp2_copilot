@@ -9,7 +9,7 @@ keywords = [
     "失速", "进近", "着陆", "导航", "航向", "遥测", "游戏",
     "flight simulator", "aviation", "attitude", "airspeed", "checklist", "glideslope", "telemetry"
 ]
-version = "0.1.0"
+version = "0.1.1"
 type = "plugin"
 entry = "plugin.plugins.sp2_copilot:Sp2CopilotPlugin"
 
