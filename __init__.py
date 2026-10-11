@@ -1095,7 +1095,7 @@ def _summarize_aircraft(aircraft: Dict[str, Any]) -> str:
     if integrity is not None:
         parts.append(f"机体完整度 {_fmt_pct(integrity)}")
 
-    return "；".join(parts) + "。"
+    return "；".join(parts) + "。" if parts else "读不到机体数据。"
 
 
 def _summarize_navigation(nav: Dict[str, Any], state: Dict[str, Any]) -> str:
@@ -1159,7 +1159,7 @@ def _summarize_warnings(warnings: List[Dict[str, Any]]) -> str:
     if caution:
         parts.append("【提示】" + "；".join(_as_text(w.get("text")) for w in caution[:2]))
     tail = f"共 {len(warnings)} 条告警。" if len(warnings) > 6 else ""
-    return " ".join(parts) + tail
+    return " ".join(parts) + tail if parts else "没有可识别的告警。"
 
 
 def _summarize_checklist(checklist: Dict[str, Any]) -> str:
