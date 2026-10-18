@@ -36,6 +36,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -633,21 +634,36 @@ def _scan_warnings(
             ))
 
     # ── 发动机 ────────────────────────────────────────────────────────
+    # 注意：`running` 缺失 ≠ 停车。
+    # 模组用 SetIfNotNull 写这个字段 —— 反射读不到就直接省略它。
+    # 旧代码把缺失当 False，于是在满油门爬升时误报"发动机全部停车"。
+    # 现在只有**明确读到 bool** 的引擎才计入统计。
     running = 0
     total = 0
     broken_engines: List[str] = []
-    for item in engines:
+    for idx, item in enumerate(engines):
         if not isinstance(item, dict):
             continue
-        total += 1
-        name = _as_text(item.get("name")) or f"#{total - 1}"
+        name = _as_text(item.get("name")) or f"#{idx}"
         if _as_bool(item.get("on_fire")):
             out.append(_warn("engine_fire", "danger", f"发动机「{name}」着火了。", "关车灭火（看机体有没有灭火开关），准备迫降。"))
         if _as_bool(item.get("damaged")):
             broken_engines.append(name)
-        if _as_bool(item.get("running")):
-            running += 1
-    if total > 0 and running == 0 and in_air:
+        flag = item.get("running")
+        if isinstance(flag, bool):
+            total += 1
+            if flag:
+                running += 1
+
+    # 物理交叉验证：油门推着而且还在爬升，发动机不可能全停。
+    # 这条兜底能挡住任何"字段读不到 → 误判停机"的情况。
+    throttle = _num(controls.get("throttle"))
+    vs = _num(flight.get("vertical_speed"))
+    plugged_in = throttle is not None and throttle > 0.05
+    climbing = vs is not None and vs > 0.5
+    obviously_powered = plugged_in and climbing
+
+    if total > 0 and running == 0 and in_air and not obviously_powered:
         out.append(_warn(
             "all_engines_out", "danger",
             f"{total} 台发动机全部停车，空中没有动力。",
@@ -778,13 +794,16 @@ def _build_checklist(
         status, detail = _tri(check, "刹车已松开", "刹车还踩着，松开才滑得动")
         items.append(_item("brake", "松开刹车", status, detail))
 
+        # 只有明确读到开关状态的引擎才参与判断；读不到就当未知，
+        # 不要因为字段缺失就把发动机判成"没转"。
+        known_engines = [e for e in engines if isinstance(e, dict) and isinstance(e.get("running"), bool)]
         running = None
-        if engines:
-            running = sum(1 for e in engines if isinstance(e, dict) and _as_bool(e.get("running")))
+        if known_engines:
+            running = sum(1 for e in known_engines if e["running"])
         check = None if running is None else running > 0
         status, detail = _tri(
             check,
-            f"{running}/{len(engines)} 台发动机在转" if running is not None else "",
+            f"{running}/{len(known_engines)} 台发动机在转" if running is not None else "",
             "发动机都没转，先启动",
         )
         items.append(_item("engines", "发动机启动并稳定", status, detail))
@@ -1083,8 +1102,13 @@ def _summarize_aircraft(aircraft: Dict[str, Any]) -> str:
 
     engines = _as_list(aircraft.get("engines"))
     if engines:
-        running = sum(1 for e in engines if isinstance(e, dict) and _as_bool(e.get("running")))
-        parts.append(f"发动机 {running}/{len(engines)} 台在转")
+        # 只统计明确读到状态的引擎；读不到就报"状态未知"，不要报 0
+        known = [e for e in engines if isinstance(e, dict) and isinstance(e.get("running"), bool)]
+        if known:
+            running = sum(1 for e in known if e["running"])
+            parts.append(f"发动机 {running}/{len(known)} 台在转")
+        else:
+            parts.append(f"发动机 {len(engines)} 台（开关状态读不到）")
 
     gear = _as_dict(aircraft.get("gear"))
     if gear:
@@ -1178,6 +1202,52 @@ def _summarize_checklist(checklist: Dict[str, Any]) -> str:
     return "；".join(parts) + "。"
 
 
+# 自动播报的合并键：同键的排队消息只留最新一条，轮询再频繁也不会把上下文撑爆。
+AUTO_BRIEF_COALESCE_KEY = "sp2_auto_brief"
+
+# 自动播报的前缀，角色一眼能看出这是仪器读数不是主人在说话。
+AUTO_BRIEF_PREFIX = "【副驾驶自动播报】"
+
+
+def _auto_brief_line(brief: Dict[str, Any]) -> str:
+    """把一份副驾驶简报压成一段给模型看的状态文本。
+
+    刻意压短：这段会一直待在上下文里跟着每一轮走，写长了就是每轮白烧
+    token。只留「要不要开口提醒」真正用得上的东西 —— 当前状态、危险告警、
+    还没打勾的检查单项。
+    """
+    chunks: List[str] = []
+
+    status = _as_text(brief.get("status_summary"))
+    if status:
+        chunks.append(status)
+
+    # 机体那一段单独给：油量和发动机状态不在 status_summary 里，
+    # 而这恰恰是最容易出人命的两项。
+    aircraft = _summarize_aircraft(_as_dict(brief.get("aircraft")))
+    if aircraft:
+        chunks.append(aircraft)
+
+    warnings = [w for w in (brief.get("warnings") or []) if isinstance(w, dict)]
+    danger = [w for w in warnings if _as_text(w.get("level")) in ("danger", "critical")]
+    if danger:
+        chunks.append("【要立刻提醒】" + "；".join(_as_text(w.get("text")) for w in danger if _as_text(w.get("text"))))
+    elif warnings:
+        chunks.append("注意：" + "；".join(_as_text(w.get("text")) for w in warnings if _as_text(w.get("text"))))
+
+    checklist = _as_dict(brief.get("checklist"))
+    pending = [
+        _as_text(item.get("label"))
+        for item in (checklist.get("items") or [])
+        if isinstance(item, dict) and _as_text(item.get("status")) == "pending" and _as_text(item.get("label"))
+    ]
+    if pending:
+        chunks.append("该做没做：" + "；".join(pending))
+
+    body = " ".join(chunk for chunk in chunks if chunk)
+    return f"{AUTO_BRIEF_PREFIX}{body}" if body else AUTO_BRIEF_PREFIX + "暂时没有可用的仪表读数。"
+
+
 # ---------------------------------------------------------------------------
 # 插件主体
 # ---------------------------------------------------------------------------
@@ -1204,6 +1274,14 @@ class Sp2CopilotPlugin(Sp2UiMixin, NekoPluginBase):
 
         self._client: Optional[httpx.AsyncClient] = None
         self._client_loop: Any = None
+
+        # 自动播报（见 _auto_brief_loop）
+        self._auto_brief_enabled: bool = True
+        self._auto_brief_interval: float = 20.0
+        self._auto_brief_task: Any = None
+        self._auto_brief_stop: Any = None
+        self._auto_brief_last_text: str = ""
+        self._auto_brief_last_ok: Optional[bool] = None
 
         # 面板用的最近一次连通性（见 ui_api.py）
         self._ui_last_connected: Optional[bool] = None
@@ -1343,6 +1421,14 @@ class Sp2CopilotPlugin(Sp2UiMixin, NekoPluginBase):
             self._poll_interval = 3.0
         self._poll_interval = _clamp(self._poll_interval, 1.0, 30.0)
 
+        # 自动播报：默认开。关掉就退回问答式（只在你问了才读仪表）。
+        self._auto_brief_enabled = _as_bool(section.get("auto_brief_enabled"), True)
+        try:
+            brief_interval = float(section.get("auto_brief_interval_seconds", 20))
+        except (TypeError, ValueError):
+            brief_interval = 20.0
+        self._auto_brief_interval = _clamp(brief_interval, 5.0, 120.0)
+
         self._thresholds = {
             "terrain_agl_m": _cfg_number(section, "terrain_warning_agl_m", DEFAULT_TERRAIN_AGL_M, 30.0, 1000.0),
             "sink_rate_mps": _cfg_number(section, "sink_rate_warning_mps", DEFAULT_SINK_RATE_MPS, 1.0, 30.0),
@@ -1353,20 +1439,26 @@ class Sp2CopilotPlugin(Sp2UiMixin, NekoPluginBase):
         }
 
         self.logger.info(
-            "Sp2Copilot 已就绪（只读副驾驶），桥接地址={} 超时={} 轮询={}",
+            "Sp2Copilot 已就绪（只读副驾驶），桥接地址={} 超时={} 轮询={} 自动播报={}",
             self._bridge_url,
             self._timeout,
             self._poll_interval,
+            f"开/{self._auto_brief_interval:g}s" if self._auto_brief_enabled else "关",
         )
+        if self._auto_brief_enabled:
+            self._start_auto_brief()
         return Ok({
             "status": "ready",
             "mode": "read-only",
             "bridge_url": self._bridge_url,
             "poll_interval_seconds": self._poll_interval,
+            "auto_brief": self._auto_brief_enabled,
+            "auto_brief_interval_seconds": self._auto_brief_interval,
         })
 
     @lifecycle(id="shutdown")
     async def on_shutdown(self, **_):
+        await self._stop_auto_brief()
         client = self._client
         self._client = None
         self._client_loop = None
@@ -1450,6 +1542,98 @@ class Sp2CopilotPlugin(Sp2UiMixin, NekoPluginBase):
             "errors": _as_dict(snap.get("errors")),
             "read_only": True,
         }
+
+    # -- 自动播报（游戏在跑时，让角色每轮对话都提前拿到数据）----------------
+
+    async def _auto_brief_once(self) -> None:
+        """读一次仪表，把压缩后的状态塞进上下文。
+
+        用 ``visibility=[]`` + ``ai_behavior="read"``：只进模型上下文，不弹给
+        用户看、也不打断当前这轮对话；等主人下次开口时，角色已经知道飞机
+        现在什么状况，于是不用临场调工具也能直接接话。
+        ``coalesce_key`` 让排队区里只保留最新一条，轮询再快也不会越攒越多。
+        """
+        try:
+            snap = await self._snapshot()
+        except Exception as exc:  # 桥接进程没起来时 httpx 会抛各种连接错误
+            self.logger.debug("自动播报取数失败: {}", exc)
+            return
+
+        connected = bool(snap.get("connected"))
+        if connected:
+            text = _auto_brief_line(self._build_briefing(snap))
+        else:
+            if not self._auto_brief_last_ok:
+                return  # 一直没连上过 —— 游戏没开，就别往上下文里灌噪音
+            text = f"{AUTO_BRIEF_PREFIX}游戏已经退出或断开了，读不到新的仪表数据。"
+
+        if connected == self._auto_brief_last_ok and text == self._auto_brief_last_text:
+            return  # 和上次一模一样，没必要重复塞
+        self._auto_brief_last_ok = connected
+        self._auto_brief_last_text = text
+
+        try:
+            result = self.push_message(
+                visibility=[],
+                ai_behavior="read",
+                coalesce_key=AUTO_BRIEF_COALESCE_KEY,
+                source="sp2_auto_brief",
+                parts=[{"type": "text", "text": text}],
+            )
+        except Exception as exc:
+            self.logger.debug("自动播报推送出错: {}", exc)
+            return
+        if not _as_dict(result).get("submitted"):
+            self.logger.debug("自动播报未进队: {}", _as_dict(result).get("reason"))
+
+    def _start_auto_brief(self) -> None:
+        """起后台轮询任务（在 on_startup 的事件循环里调用）。"""
+        if self._auto_brief_task is not None and not self._auto_brief_task.done():
+            return
+        try:
+            self._auto_brief_stop = asyncio.Event()
+            self._auto_brief_task = asyncio.create_task(self._auto_brief_loop())
+        except RuntimeError:
+            # 没有运行中的事件循环（宿主同步启动 / 单测环境）
+            self._auto_brief_task = None
+            self._auto_brief_stop = None
+
+    async def _stop_auto_brief(self) -> None:
+        """停掉后台轮询任务（on_shutdown 调用）。"""
+        task = self._auto_brief_task
+        stop = self._auto_brief_stop
+        self._auto_brief_task = None
+        self._auto_brief_stop = None
+        if stop is not None:
+            stop.set()
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # pragma: no cover
+                self.logger.debug("停止自动播报时出错: {}", exc)
+
+    async def _auto_brief_loop(self) -> None:
+        """先报一次，然后按间隔循环；``stop`` 被置位就退出。"""
+        stop = self._auto_brief_stop
+        if stop is None:
+            return
+        while not stop.is_set():
+            try:
+                await self._auto_brief_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # 单轮失败绝不拖垮后台任务
+                self.logger.debug("自动播报这一轮出错: {}", exc)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=self._auto_brief_interval)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                raise
+            return
 
     # -- LLM 工具 ---------------------------------------------------------
 

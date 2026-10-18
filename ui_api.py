@@ -104,6 +104,8 @@ class Sp2UiMixin:
             "bridge_url": str(getattr(self, "_bridge_url", "") or ""),
             "timeout_seconds": float(getattr(self, "_timeout", 12.0)),
             "poll_interval_seconds": float(getattr(self, "_poll_interval", 3.0)),
+            "auto_brief_enabled": bool(getattr(self, "_auto_brief_enabled", True)),
+            "auto_brief_interval_seconds": float(getattr(self, "_auto_brief_interval", 20.0)),
             "terrain_warning_agl_m": float(th.get("terrain_agl_m", defaults["terrain_agl_m"])),
             "sink_rate_warning_mps": float(th.get("sink_rate_mps", defaults["sink_rate_mps"])),
             "bank_warning_deg": float(th.get("bank_deg", defaults["bank_deg"])),
@@ -308,6 +310,8 @@ class Sp2UiMixin:
                 "bridge_url": {"type": "string"},
                 "timeout_seconds": {"type": "number"},
                 "poll_interval_seconds": {"type": "number"},
+                "auto_brief_enabled": {"type": "boolean"},
+                "auto_brief_interval_seconds": {"type": "number"},
                 "terrain_warning_agl_m": {"type": "number"},
                 "sink_rate_warning_mps": {"type": "number"},
                 "bank_warning_deg": {"type": "number"},
@@ -324,6 +328,8 @@ class Sp2UiMixin:
         bridge_url: Optional[str] = None,
         timeout_seconds: Optional[float] = None,
         poll_interval_seconds: Optional[float] = None,
+        auto_brief_enabled: Optional[bool] = None,
+        auto_brief_interval_seconds: Optional[float] = None,
         terrain_warning_agl_m: Optional[float] = None,
         sink_rate_warning_mps: Optional[float] = None,
         bank_warning_deg: Optional[float] = None,
@@ -357,6 +363,14 @@ class Sp2UiMixin:
             "poll_interval_seconds": _number(
                 poll_interval_seconds, current["poll_interval_seconds"], 1.0, 30.0
             ),
+            "auto_brief_enabled": (
+                bool(auto_brief_enabled)
+                if auto_brief_enabled is not None
+                else bool(current["auto_brief_enabled"])
+            ),
+            "auto_brief_interval_seconds": _number(
+                auto_brief_interval_seconds, current["auto_brief_interval_seconds"], 5.0, 120.0
+            ),
             "terrain_warning_agl_m": _number(
                 terrain_warning_agl_m, current["terrain_warning_agl_m"], 30.0, 1000.0
             ),
@@ -383,6 +397,8 @@ class Sp2UiMixin:
         self._bridge_url = section["bridge_url"]
         self._timeout = section["timeout_seconds"]
         self._poll_interval = section["poll_interval_seconds"]
+        self._auto_brief_enabled = section["auto_brief_enabled"]
+        self._auto_brief_interval = section["auto_brief_interval_seconds"]
         self._thresholds = {
             "terrain_agl_m": section["terrain_warning_agl_m"],
             "sink_rate_mps": section["sink_rate_warning_mps"],
@@ -391,6 +407,14 @@ class Sp2UiMixin:
             "aoa_deg": section["aoa_warning_deg"],
             "overspeed_ratio": section["overspeed_warning_ratio"],
         }
+
+        # 自动播报的开关/间隔也可能刚被改了：按新设置重起后台任务（幂等）。
+        try:
+            await self._stop_auto_brief()
+            if self._auto_brief_enabled:
+                self._start_auto_brief()
+        except Exception as exc:  # pragma: no cover
+            self.logger.debug("[sp2_copilot] 重启动自动播报失败：{}", exc)
 
         return Ok({
             "ok": True,

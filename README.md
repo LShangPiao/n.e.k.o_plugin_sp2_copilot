@@ -97,11 +97,23 @@ python tools/mock_bridge.py --scenario cruise
 - **bridge_url** —— 模组监听的地址，默认 `http://127.0.0.1:21580`
 - **timeout_seconds** —— 请求超时，默认 12 秒
 - **poll_interval_seconds** —— 面板自动刷新间隔，默认 3 秒
+- **auto_brief_enabled** —— 自动播报开关，默认开
+- **auto_brief_interval_seconds** —— 自动播报间隔，默认 20 秒
 - **告警阈值** —— 近地高度、下降率、坡度、低油量、迎角、超速预警比例
 
 > 改端口要改**两处**：模组侧的配置和这里的 `bridge_url`。
 
 阈值只影响「什么时候提醒你」，不影响游戏本身。
+
+### 自动播报：为什么它不用你开口
+
+以前是「你问一句、它读一次」。现在游戏一开，插件就在后台每隔
+`auto_brief_interval_seconds` 读一次仪表，把压成一小段的状态放进角色的上下文
+（`push_message` 的 `ai_behavior="read"`）：不打断对话、不弹提示，但**你下一句话
+说出口的时候，它已经知道飞机现在什么高度、什么速度、有没有告警**。
+
+同一时刻只会保留最新一条，所以不用担心上下文被喂爆；游戏没开时完全不播报。
+不想要就在设置里把 `auto_brief_enabled` 关掉，退回问答式。
 
 ---
 

@@ -29,6 +29,7 @@ import {
   Stack,
   StatCard,
   StatusBadge,
+  Switch,
   Text,
   Tip,
   Toolbar,
@@ -422,6 +423,8 @@ export default function Sp2CopilotPanel(props: PluginSurfaceProps<PanelState>) {
       bridge_url: asText(effective.bridge_url),
       timeout_seconds: numberOr(effective.timeout_seconds, 12),
       poll_interval_seconds: numberOr(effective.poll_interval_seconds, 3),
+      auto_brief_enabled: effective.auto_brief_enabled !== false,
+      auto_brief_interval_seconds: numberOr(effective.auto_brief_interval_seconds, 20),
       terrain_warning_agl_m: numberOr(effective.terrain_warning_agl_m, 300),
       sink_rate_warning_mps: numberOr(effective.sink_rate_warning_mps, 6),
       bank_warning_deg: numberOr(effective.bank_warning_deg, 45),
@@ -541,6 +544,8 @@ export default function Sp2CopilotPanel(props: PluginSurfaceProps<PanelState>) {
       bridge_url: url,
       timeout_seconds: numberOr(fieldValue("timeout_seconds", 12), 12),
       poll_interval_seconds: numberOr(fieldValue("poll_interval_seconds", 3), 3),
+      auto_brief_enabled: fieldValue("auto_brief_enabled", true) !== false,
+      auto_brief_interval_seconds: numberOr(fieldValue("auto_brief_interval_seconds", 20), 20),
       terrain_warning_agl_m: numberOr(fieldValue("terrain_warning_agl_m", 300), 300),
       sink_rate_warning_mps: numberOr(fieldValue("sink_rate_warning_mps", 6), 6),
       bank_warning_deg: numberOr(fieldValue("bank_warning_deg", 45), 45),
@@ -904,6 +909,34 @@ export default function Sp2CopilotPanel(props: PluginSurfaceProps<PanelState>) {
                 min={1}
                 max={30}
                 onChange={(value: any) => setField("poll_interval_seconds", numberOr(value, 3))}
+              />
+            </Field>
+          </Grid>
+        </Stack>
+      </Card>
+
+      <Card title="自动播报">
+        <Stack>
+          <Tip>
+            游戏在跑的时候，插件会在后台读仪表，把最新状态放进角色的上下文
+            ——不打断对话、不弹提示，但你一开口，它就已经知道飞机现在什么高度、
+            什么速度、有没有告警。同一时刻只保留最新一条，不会把上下文撑爆；
+            游戏没开时完全不播报。
+          </Tip>
+          <Switch
+            checked={fieldValue("auto_brief_enabled", true) !== false}
+            label="开启自动播报（关掉就退回问答式：你问了才读）"
+            onChange={(value: boolean) => setField("auto_brief_enabled", value)}
+          />
+          <Grid cols={2} gap={10}>
+            <Field label="播报间隔（秒）" help="范围 5-120，突变最迟一个间隔内播报">
+              <NumberInput
+                value={numberOr(fieldValue("auto_brief_interval_seconds", 20), 20)}
+                min={5}
+                max={120}
+                onChange={(value: any) =>
+                  setField("auto_brief_interval_seconds", numberOr(value, 20))
+                }
               />
             </Field>
           </Grid>
